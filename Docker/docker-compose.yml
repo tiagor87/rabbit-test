@@ -1,0 +1,6 @@
+version: "3"
+services:
+  bus:
+    image: rabbitmq:3.7.8-management-alpine
+    ports:
+      - 8091:5672
