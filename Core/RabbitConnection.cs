@@ -12,11 +12,11 @@ namespace Core
 {
     public class RabbitConnection : IDisposable
     {
-        private static volatile object sync = new object();
+        private static volatile object _sync = new object();
         private readonly IModel _channel;
         private readonly IConnection _connection;
         private readonly IDictionary<Queue, EventingBasicConsumer> _consumers;
-        private readonly IDictionary<Queue, List<IRabbitSubscription>> _subscriptions;
+        private readonly IDictionary<Queue, List<IRabbitObserver>> _subscriptions;
         private bool _disposed;
 
 
@@ -29,7 +29,7 @@ namespace Core
             _connection = factory.CreateConnection();
             _channel = _connection.CreateModel();
             _consumers = new ConcurrentDictionary<Queue, EventingBasicConsumer>();
-            _subscriptions = new ConcurrentDictionary<Queue, List<IRabbitSubscription>>();
+            _subscriptions = new ConcurrentDictionary<Queue, List<IRabbitObserver>>();
         }
 
         public void Dispose()
@@ -54,38 +54,37 @@ namespace Core
             _channel.BasicPublish(exchange.Name, queue.Routing, props, message.Message);
         }
 
-        public void Subscribe<T>(RabbitSubscription<T> subscription) where T : class
+        public void Subscribe<T>(RabbitObserver<T> observer) where T : class
         {
-            DeclareExchangeAndQueue(subscription.Exchange, subscription.Queue);
+            DeclareExchangeAndQueue(observer.Exchange, observer.Queue);
 
-            List<IRabbitSubscription> subscriptions;
-            lock (sync)
+            List<IRabbitObserver> subscriptions;
+            lock (_sync)
             {
-                if (_subscriptions.TryGetValue(subscription.Queue, out subscriptions))
+                if (_subscriptions.TryGetValue(observer.Queue, out subscriptions))
                 {
-                    subscriptions.Add(subscription);
+                    subscriptions.Add(observer);
                 }
                 else
                 {
-                    subscriptions = new List<IRabbitSubscription>();
-                    subscriptions.Add(subscription);
-                    _subscriptions.Add(subscription.Queue, subscriptions);
+                    subscriptions = new List<IRabbitObserver> {observer};
+                    _subscriptions.Add(observer.Queue, subscriptions);
                 }
             }
 
-            subscription.SetUnsubscribe(Unsubscribe);
+            observer.SetUnsubscribe(Unsubscribe);
 
-            lock (sync)
+            lock (_sync)
             {
-                if (_consumers.ContainsKey(subscription.Queue) == false)
+                if (_consumers.ContainsKey(observer.Queue) == false)
                 {
                     var consumer = new EventingBasicConsumer(_channel);
                     consumer.Received += async (model, @event) =>
                     {
                         var json = Encoding.UTF8.GetString(@event.Body);
                         // ToDo: Remove subscription.Type dependency
-                        var obj = JsonConvert.DeserializeObject(json, subscription.Type);
-                        var tasks = subscriptions.Select(s => s.Handle(obj));
+                        var obj = JsonConvert.DeserializeObject(json, observer.Type);
+                        var tasks = subscriptions.Select(s => s.Next(obj));
                         try
                         {
                             await Task.WhenAll(tasks);
@@ -96,8 +95,8 @@ namespace Core
                             _channel.BasicNack(@event.DeliveryTag, false, true);
                         }
                     };
-                    _consumers.Add(subscription.Queue, consumer);
-                    _channel.BasicConsume(subscription.Queue.Name, false, consumer);
+                    _consumers.Add(observer.Queue, consumer);
+                    _channel.BasicConsume(observer.Queue.Name, false, consumer);
                 }
             }
         }
@@ -132,13 +131,13 @@ namespace Core
             _channel.QueueBind(queue.Name, exchange.Name, queue.Routing);
         }
 
-        private void Unsubscribe(IRabbitSubscription subscription)
+        private void Unsubscribe(IRabbitObserver observer)
         {
-            lock (sync)
+            lock (_sync)
             {
-                if (_subscriptions.TryGetValue(subscription.Queue, out var subscriptions))
+                if (_subscriptions.TryGetValue(observer.Queue, out var subscriptions))
                 {
-                    subscriptions.Remove(subscription);
+                    subscriptions.Remove(observer);
                 }
             }
         }
